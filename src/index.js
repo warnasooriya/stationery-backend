@@ -2,7 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const { connectDB } = require('./db');
+const { connectDB, getConnection } = require('./db');
 const User = require('./models/User');
 
 const usersRouter = require('./routes/users');
@@ -26,9 +26,20 @@ app.use(
   })
 );
 
-app.get('/api/health', (_req, res) => {
-  res.json({ ok: true });
-});
+const healthCheckHandler = (_req, res) => {
+  const dbConnection = getConnection();
+  const dbConnected = dbConnection && dbConnection.connection.readyState === 1;
+  
+  res.json({ 
+    ok: true,
+    status: 'healthy',
+    database: dbConnected ? 'connected' : 'disconnected',
+    timestamp: new Date().toISOString()
+  });
+};
+
+app.get('/', healthCheckHandler);
+app.get('/api/health', healthCheckHandler);
 
 app.use('/api/users', usersRouter);
 
