@@ -1,6 +1,7 @@
 const express = require('express');
 const { z } = require('zod');
-const { withTransaction, getPool } = require('../db');
+const Issuance = require('../models/Issuance');
+const Employee = require('../models/Employee');
 const { getCurrentStockForUpdate } = require('../services/inventory');
 
 const router = express.Router();
@@ -18,106 +19,58 @@ router.get('/', async (req, res, next) => {
 
     const q = querySchema.parse(req.query);
 
-    const itemId = q.itemId ? Number(q.itemId) : null;
-    const employeeId = q.employeeId ? Number(q.employeeId) : null;
-    const startDate = q.startDate || null;
-    const endDate = q.endDate || null;
+    const itemId = q.itemId || null;
+    const employeeId = q.employeeId || null;
+    const startDate = q.startDate ? new Date(q.startDate) : null;
+    const endDate = q.endDate ? new Date(q.endDate + 'T23:59:59.999Z') : null;
 
     const page = q.page ? Number(q.page) : 1;
     const pageSize = q.pageSize ? Number(q.pageSize) : 25;
-
-    if (itemId !== null && !Number.isFinite(itemId)) return res.status(400).json({ error: 'Invalid itemId' });
-    if (employeeId !== null && !Number.isFinite(employeeId)) return res.status(400).json({ error: 'Invalid employeeId' });
-
     const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
-    const safePageSize =
-      Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 25;
-    const offset = (safePage - 1) * safePageSize;
-
-    const db = getPool();
+    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 25;
+    const skip = (safePage - 1) * safePageSize;
 
     let employeeIdentifier = null;
-    if (employeeId !== null) {
-      const [employeeRows] = await db.query(
-        `
-        SELECT employee_identifier
-        FROM employees
-        WHERE id = ? AND is_active = 1
-        `,
-        [employeeId]
-      );
-      if (employeeRows.length === 0) return res.status(404).json({ error: 'Employee not found' });
-      employeeIdentifier = employeeRows[0].employee_identifier;
+    if (employeeId) {
+      const employee = await Employee.findById(employeeId);
+      if (!employee || !employee.isActive) return res.status(404).json({ error: 'Employee not found' });
+      employeeIdentifier = employee.employeeIdentifier;
     }
 
-    const where = [];
-    const params = [];
+    const filter = {};
+    if (itemId) filter.itemId = itemId;
+    if (employeeIdentifier) filter.issuedTo = employeeIdentifier;
+    if (startDate) filter.issuedAt = { ...filter.issuedAt, $gte: startDate };
+    if (endDate) filter.issuedAt = { ...filter.issuedAt, $lte: endDate };
 
-    if (itemId !== null) {
-      where.push('s.item_id = ?');
-      params.push(itemId);
-    }
-    if (startDate) {
-      where.push('s.issued_at >= ?');
-      params.push(startDate);
-    }
-    if (endDate) {
-      where.push('s.issued_at <= ?');
-      params.push(endDate);
-    }
-    if (employeeIdentifier) {
-      where.push('s.issued_to = ?');
-      params.push(employeeIdentifier);
-    }
+    const total = await Issuance.countDocuments(filter);
 
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+    const issuances = await Issuance.find(filter)
+      .sort({ issuedAt: -1, _id: -1 })
+      .skip(skip)
+      .limit(safePageSize)
+      .populate('itemId', 'itemIdentifier itemDescription');
 
-    const [countRows] = await db.query(
-      `
-      SELECT COUNT(*) AS c
-      FROM issuance_log s
-      ${whereSql}
-      `,
-      params
-    );
-    const total = Number(countRows[0]?.c || 0);
-
-    const [rows] = await db.query(
-      `
-      SELECT
-        s.id,
-        s.issued_at,
-        s.item_id,
-        i.item_identifier,
-        i.item_description,
-        s.quantity_issued,
-        s.issued_to,
-        e.id AS employee_id,
-        e.employee_name,
-        s.purpose_project
-      FROM issuance_log s
-      INNER JOIN items i ON i.id = s.item_id
-      LEFT JOIN employees e ON e.employee_identifier = s.issued_to AND e.is_active = 1
-      ${whereSql}
-      ORDER BY s.issued_at DESC, s.id DESC
-      LIMIT ? OFFSET ?
-      `,
-      [...params, safePageSize, offset]
-    );
+    const issuedToIdentifiers = [...new Set(issuances.map(i => i.issuedTo))];
+    const employees = await Employee.find({ employeeIdentifier: { $in: issuedToIdentifiers } });
+    const employeeMap = new Map(employees.map(e => [e.employeeIdentifier, e]));
 
     res.json({
-      issuances: rows.map((r) => ({
-        id: r.id,
-        issuedAt: r.issued_at,
-        itemId: r.item_id,
-        itemIdentifier: r.item_identifier,
-        itemDescription: r.item_description,
-        quantityIssued: Number(r.quantity_issued),
-        employeeId: r.employee_id || null,
-        employeeIdentifier: r.issued_to,
-        employeeName: r.employee_name || null,
-        purposeProject: r.purpose_project
-      })),
+      issuances: issuances.map(i => {
+        const emp = employeeMap.get(i.issuedTo);
+        return {
+          id: i._id,
+          issuedAt: i.issuedAt,
+          itemId: i.itemId._id,
+          itemIdentifier: i.itemId.itemIdentifier,
+          itemDescription: i.itemId.itemDescription,
+          quantityIssued: i.quantityIssued,
+          employeeId: emp?._id || null,
+          employeeIdentifier: i.issuedTo,
+          employeeName: emp?.employeeName || null,
+          purposeProject: i.purposeProject
+        };
+      }),
       page: safePage,
       pageSize: safePageSize,
       total
@@ -131,74 +84,48 @@ router.post('/', async (req, res, next) => {
   try {
     const schema = z.object({
       issuedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-      itemId: z.number().int().positive(),
+      itemId: z.string(),
       quantityIssued: z.number().int().positive(),
-      employeeId: z.number().int().positive(),
+      employeeId: z.string(),
       purposeProject: z.string().trim().min(1).max(255)
     });
 
     const input = schema.parse(req.body);
 
-    const result = await withTransaction(async (connection) => {
-      const [employeeRows] = await connection.query(
-        `
-        SELECT id, employee_identifier, employee_name
-        FROM employees
-        WHERE id = ? AND is_active = 1
-        `,
-        [input.employeeId]
-      );
-      const employee = employeeRows[0];
-      if (!employee) return { status: 404, body: { error: 'Employee not found' } };
+    const employee = await Employee.findById(input.employeeId);
+    if (!employee || !employee.isActive) return { status: 404, body: { error: 'Employee not found' } };
 
-      const stock = await getCurrentStockForUpdate(connection, input.itemId);
-      if (!stock) return { status: 404, body: { error: 'Item not found' } };
+    const stock = await getCurrentStockForUpdate(input.itemId);
+    if (!stock) return { status: 404, body: { error: 'Item not found' } };
 
-      if (input.quantityIssued > stock.currentStock) {
-        return {
-          status: 400,
-          body: {
-            error: 'Insufficient stock for issuance',
-            currentStock: stock.currentStock
-          }
-        };
-      }
+    if (input.quantityIssued > stock.currentStock) {
+      return res.status(400).json({
+        error: 'Insufficient stock for issuance',
+        currentStock: stock.currentStock
+      });
+    }
 
-      const [inserted] = await connection.query(
-        `
-        INSERT INTO issuance_log (
-          issued_at, item_id, quantity_issued, issued_to, department, purpose_project
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        `,
-        [
-          input.issuedAt,
-          input.itemId,
-          input.quantityIssued,
-          employee.employee_identifier,
-          '',
-          input.purposeProject
-        ]
-      );
-
-      return {
-        status: 201,
-        body: {
-          issuance: {
-            id: inserted.insertId,
-            issuedAt: input.issuedAt,
-            itemId: input.itemId,
-            quantityIssued: input.quantityIssued,
-            employeeId: employee.id,
-            employeeIdentifier: employee.employee_identifier,
-            employeeName: employee.employee_name,
-            purposeProject: input.purposeProject
-          }
-        }
-      };
+    const issuance = await Issuance.create({
+      issuedAt: new Date(input.issuedAt),
+      itemId: input.itemId,
+      quantityIssued: input.quantityIssued,
+      issuedTo: employee.employeeIdentifier,
+      department: '',
+      purposeProject: input.purposeProject
     });
 
-    res.status(result.status).json(result.body);
+    res.status(201).json({
+      issuance: {
+        id: issuance._id,
+        issuedAt: issuance.issuedAt,
+        itemId: issuance.itemId,
+        quantityIssued: issuance.quantityIssued,
+        employeeId: employee._id,
+        employeeIdentifier: employee.employeeIdentifier,
+        employeeName: employee.employeeName,
+        purposeProject: issuance.purposeProject
+      }
+    });
   } catch (err) {
     next(err);
   }

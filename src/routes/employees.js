@@ -1,26 +1,20 @@
 const express = require('express');
 const { z } = require('zod');
-const { getPool } = require('../db');
+const Employee = require('../models/Employee');
 
 const router = express.Router();
 
 router.get('/', async (_req, res, next) => {
   try {
-    const db = getPool();
-    const [rows] = await db.query(
-      `
-      SELECT id, employee_identifier, employee_name
-      FROM employees
-      WHERE is_active = 1
-      ORDER BY employee_identifier ASC
-      `
-    );
+    const employees = await Employee.find({ isActive: true })
+      .sort({ employeeIdentifier: 1 })
+      .select('employeeIdentifier employeeName');
 
     res.json({
-      employees: rows.map((r) => ({
-        id: r.id,
-        employeeIdentifier: r.employee_identifier,
-        employeeName: r.employee_name
+      employees: employees.map(e => ({
+        id: e._id,
+        employeeIdentifier: e.employeeIdentifier,
+        employeeName: e.employeeName
       }))
     });
   } catch (err) {
@@ -36,25 +30,19 @@ router.post('/', async (req, res, next) => {
     });
     const input = schema.parse(req.body);
 
-    const db = getPool();
-    const [existing] = await db.query(`SELECT id FROM employees WHERE employee_identifier = ?`, [
-      input.employeeIdentifier
-    ]);
-    if (existing.length > 0) return res.status(409).json({ error: 'Employee Identifier already exists' });
+    const existing = await Employee.findOne({ employeeIdentifier: input.employeeIdentifier });
+    if (existing) return res.status(409).json({ error: 'Employee Identifier already exists' });
 
-    const [result] = await db.query(
-      `
-      INSERT INTO employees (employee_identifier, employee_name)
-      VALUES (?, ?)
-      `,
-      [input.employeeIdentifier, input.employeeName]
-    );
+    const employee = await Employee.create({
+      employeeIdentifier: input.employeeIdentifier,
+      employeeName: input.employeeName
+    });
 
     res.status(201).json({
       employee: {
-        id: result.insertId,
-        employeeIdentifier: input.employeeIdentifier,
-        employeeName: input.employeeName
+        id: employee._id,
+        employeeIdentifier: employee.employeeIdentifier,
+        employeeName: employee.employeeName
       }
     });
   } catch (err) {
@@ -63,4 +51,3 @@ router.post('/', async (req, res, next) => {
 });
 
 module.exports = router;
-

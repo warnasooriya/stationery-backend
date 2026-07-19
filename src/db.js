@@ -1,50 +1,24 @@
-const mysql = require('mysql2/promise');
+const mongoose = require('mongoose');
 
-let pool;
+let connection;
 
-function getPool() {
-  if (pool) return pool;
+async function connectDB() {
+  if (connection) return connection;
 
-  const host = process.env.DB_HOST;
-  const port = Number(process.env.DB_PORT || 3306);
-  const user = process.env.DB_USER;
-  const password = process.env.DB_PASSWORD;
-  const database = process.env.DB_NAME;
-
-  if (!host || !user || !database) {
-    throw new Error('Missing required DB env vars: DB_HOST, DB_USER, DB_NAME');
+  const mongoUri = process.env.MONGO_URI;
+  if (!mongoUri) {
+    throw new Error('Missing required env var: MONGO_URI');
   }
 
-  pool = mysql.createPool({
-    host,
-    port,
-    user,
-    password,
-    database,
-    waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0,
-    dateStrings: true
-  });
-
-  return pool;
+  connection = await mongoose.connect(mongoUri);
+  
+  process.stdout.write('MongoDB connected successfully\n');
+  
+  return connection;
 }
 
-async function withTransaction(fn) {
-  const connection = await getPool().getConnection();
-  try {
-    await connection.beginTransaction();
-    const result = await fn(connection);
-    await connection.commit();
-    return result;
-  } catch (err) {
-    try {
-      await connection.rollback();
-    } catch (_) {}
-    throw err;
-  } finally {
-    connection.release();
-  }
+function getConnection() {
+  return connection;
 }
 
-module.exports = { getPool, withTransaction };
+module.exports = { connectDB, getConnection, mongoose };
