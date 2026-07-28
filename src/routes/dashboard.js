@@ -210,7 +210,7 @@ router.get('/', async (_req, res, next) => {
     const recentActivity = sortedEvents.slice(0, 12).map(e => ({
       type: e.type,
       id: e.id,
-      occurredAt: isoDate(e.occurredAt),
+      occurredAt: e.occurredAt,
       itemIdentifier: e.itemIdentifier,
       itemDescription: e.itemDescription,
       quantity: e.quantity,
