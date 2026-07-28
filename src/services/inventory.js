@@ -3,29 +3,41 @@ const Purchase = require('../models/Purchase');
 const Issuance = require('../models/Issuance');
 const Employee = require('../models/Employee');
 
-async function listItemsWithStock() {
-  const items = await Item.find({ isActive: true }).sort({ itemIdentifier: 1 });
-  
+async function listItemsWithStock({ search, skip, limit } = {}) {
+  const filter = { isActive: true };
+  if (search) {
+    const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    filter.$or = [{ itemIdentifier: re }, { itemDescription: re }];
+  }
+
+  const total = await Item.countDocuments(filter);
+
+  let query = Item.find(filter).sort({ itemIdentifier: 1 });
+  if (Number.isFinite(skip) && Number.isFinite(limit)) {
+    query = query.skip(skip).limit(limit);
+  }
+  const items = await query;
+
   const itemIds = items.map(item => item._id);
-  
+
   const purchases = await Purchase.aggregate([
     { $match: { itemId: { $in: itemIds } } },
     { $group: { _id: '$itemId', totalReceived: { $sum: '$quantityReceived' } } }
   ]);
-  
+
   const issuances = await Issuance.aggregate([
     { $match: { itemId: { $in: itemIds } } },
     { $group: { _id: '$itemId', totalIssued: { $sum: '$quantityIssued' } } }
   ]);
-  
+
   const purchaseMap = new Map(purchases.map(p => [p._id.toString(), p.totalReceived]));
   const issuanceMap = new Map(issuances.map(i => [i._id.toString(), i.totalIssued]));
-  
-  return items.map(item => {
+
+  const mapped = items.map(item => {
     const totalPurchased = purchaseMap.get(item._id.toString()) || 0;
     const totalIssued = issuanceMap.get(item._id.toString()) || 0;
     const currentStock = totalPurchased - totalIssued;
-    
+
     return {
       id: item._id,
       itemIdentifier: item.itemIdentifier,
@@ -37,6 +49,8 @@ async function listItemsWithStock() {
       stockStatus: currentStock <= item.minSafetyThreshold ? 'LOW STOCK' : 'GOOD'
     };
   });
+
+  return { items: mapped, total };
 }
 
 async function getItemCore(itemId) {

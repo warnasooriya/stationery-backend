@@ -2,6 +2,7 @@ const express = require('express');
 const { z } = require('zod');
 const Purchase = require('../models/Purchase');
 const Item = require('../models/Item');
+const Issuance = require('../models/Issuance');
 
 const router = express.Router();
 
@@ -21,9 +22,9 @@ router.get('/', async (req, res, next) => {
     const endDate = q.endDate ? new Date(q.endDate + 'T23:59:59.999Z') : null;
 
     const page = q.page ? Number(q.page) : 1;
-    const pageSize = q.pageSize ? Number(q.pageSize) : 25;
+    const pageSize = q.pageSize ? Number(q.pageSize) : 10;
     const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
-    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 25;
+    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 10;
     const skip = (safePage - 1) * safePageSize;
 
     const filter = {};
@@ -115,6 +116,88 @@ router.post('/', async (req, res, next) => {
         referenceInvoiceNumber: purchase.referenceInvoiceNumber
       }
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+async function getItemTotals(itemId) {
+  const [purchaseResult] = await Purchase.aggregate([
+    { $match: { itemId } },
+    { $group: { _id: null, totalReceived: { $sum: '$quantityReceived' } } }
+  ]);
+  const [issuanceResult] = await Issuance.aggregate([
+    { $match: { itemId } },
+    { $group: { _id: null, totalIssued: { $sum: '$quantityIssued' } } }
+  ]);
+  return {
+    totalPurchased: purchaseResult?.totalReceived || 0,
+    totalIssued: issuanceResult?.totalIssued || 0
+  };
+}
+
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      purchasedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      quantityReceived: z.number().int().positive().optional(),
+      supplierSource: z.string().trim().min(1).max(255).optional(),
+      referenceInvoiceNumber: z.string().trim().min(1).max(128).optional()
+    });
+    const input = schema.parse(req.body);
+
+    const purchase = await Purchase.findById(req.params.id);
+    if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
+
+    if (input.quantityReceived !== undefined && input.quantityReceived !== purchase.quantityReceived) {
+      const { totalPurchased, totalIssued } = await getItemTotals(purchase.itemId);
+      const newTotalPurchased = totalPurchased - purchase.quantityReceived + input.quantityReceived;
+      if (newTotalPurchased < totalIssued) {
+        return res.status(400).json({
+          error: 'Cannot reduce quantity — would result in negative stock for this item',
+          totalIssued,
+          maxQuantityReceived: input.quantityReceived - (newTotalPurchased - totalIssued)
+        });
+      }
+      purchase.quantityReceived = input.quantityReceived;
+    }
+
+    if (input.purchasedAt !== undefined) purchase.purchasedAt = new Date(input.purchasedAt);
+    if (input.supplierSource !== undefined) purchase.supplierSource = input.supplierSource;
+    if (input.referenceInvoiceNumber !== undefined) purchase.referenceInvoiceNumber = input.referenceInvoiceNumber;
+
+    await purchase.save();
+
+    res.json({
+      purchase: {
+        id: purchase._id,
+        purchasedAt: purchase.purchasedAt,
+        itemId: purchase.itemId,
+        quantityReceived: purchase.quantityReceived,
+        supplierSource: purchase.supplierSource,
+        referenceInvoiceNumber: purchase.referenceInvoiceNumber
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const purchase = await Purchase.findById(req.params.id);
+    if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
+
+    const { totalPurchased, totalIssued } = await getItemTotals(purchase.itemId);
+    const remainingAfterDelete = totalPurchased - purchase.quantityReceived;
+    if (remainingAfterDelete < totalIssued) {
+      return res.status(400).json({
+        error: 'Cannot delete — would result in negative stock for this item'
+      });
+    }
+
+    await Purchase.findByIdAndDelete(purchase._id);
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

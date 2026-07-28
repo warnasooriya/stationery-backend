@@ -25,9 +25,9 @@ router.get('/', async (req, res, next) => {
     const endDate = q.endDate ? new Date(q.endDate + 'T23:59:59.999Z') : null;
 
     const page = q.page ? Number(q.page) : 1;
-    const pageSize = q.pageSize ? Number(q.pageSize) : 25;
+    const pageSize = q.pageSize ? Number(q.pageSize) : 10;
     const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
-    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 25;
+    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 10;
     const skip = (safePage - 1) * safePageSize;
 
     let employeeIdentifier = null;
@@ -126,6 +126,73 @@ router.post('/', async (req, res, next) => {
         purposeProject: issuance.purposeProject
       }
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      issuedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      quantityIssued: z.number().int().positive().optional(),
+      employeeId: z.string().optional(),
+      purposeProject: z.string().trim().min(1).max(255).optional()
+    });
+    const input = schema.parse(req.body);
+
+    const issuance = await Issuance.findById(req.params.id);
+    if (!issuance) return res.status(404).json({ error: 'Issuance not found' });
+
+    if (input.quantityIssued !== undefined && input.quantityIssued !== issuance.quantityIssued) {
+      const stock = await getCurrentStockForUpdate(issuance.itemId);
+      const stockExcludingThis = stock.currentStock + issuance.quantityIssued;
+      if (input.quantityIssued > stockExcludingThis) {
+        return res.status(400).json({
+          error: 'Insufficient stock for this quantity',
+          currentStock: stockExcludingThis
+        });
+      }
+      issuance.quantityIssued = input.quantityIssued;
+    }
+
+    if (input.employeeId !== undefined) {
+      const employee = await Employee.findById(input.employeeId);
+      if (!employee || !employee.isActive) return res.status(404).json({ error: 'Employee not found' });
+      issuance.issuedTo = employee.employeeIdentifier;
+    }
+
+    if (input.issuedAt !== undefined) issuance.issuedAt = new Date(input.issuedAt);
+    if (input.purposeProject !== undefined) issuance.purposeProject = input.purposeProject;
+
+    await issuance.save();
+
+    const employee = await Employee.findOne({ employeeIdentifier: issuance.issuedTo });
+
+    res.json({
+      issuance: {
+        id: issuance._id,
+        issuedAt: issuance.issuedAt,
+        itemId: issuance.itemId,
+        quantityIssued: issuance.quantityIssued,
+        employeeId: employee?._id || null,
+        employeeIdentifier: issuance.issuedTo,
+        employeeName: employee?.employeeName || null,
+        purposeProject: issuance.purposeProject
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const issuance = await Issuance.findById(req.params.id);
+    if (!issuance) return res.status(404).json({ error: 'Issuance not found' });
+
+    await Issuance.findByIdAndDelete(issuance._id);
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

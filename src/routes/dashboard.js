@@ -16,12 +16,13 @@ function isoDate(d) {
 
 router.get('/', async (_req, res, next) => {
   try {
-    const items = await listItemsWithStock();
+    const { items } = await listItemsWithStock();
     const totalTrackedItems = items.length;
     const lowStockItems = items.filter((i) => i.stockStatus === 'LOW STOCK');
 
     const purchaseLogCount = await Purchase.countDocuments();
     const issuanceLogCount = await Issuance.countDocuments();
+    const activeEmployeeCount = await Employee.countDocuments({ isActive: true });
 
     const topIssuedAgg = await Issuance.aggregate([
       {
@@ -42,6 +43,45 @@ router.get('/', async (_req, res, next) => {
       itemIdentifier: topIssuedItemsMap.get(t._id.toString())?.itemIdentifier || '',
       itemDescription: topIssuedItemsMap.get(t._id.toString())?.itemDescription || '',
       quantityIssued: t.qtyIssued
+    }));
+
+    const topSuppliersAgg = await Purchase.aggregate([
+      {
+        $group: {
+          _id: '$supplierSource',
+          qtyReceived: { $sum: '$quantityReceived' },
+          orderCount: { $sum: 1 }
+        }
+      },
+      { $sort: { qtyReceived: -1 } },
+      { $limit: 5 }
+    ]);
+    const topSuppliers = topSuppliersAgg.map(s => ({
+      supplierSource: s._id,
+      qtyReceived: s.qtyReceived,
+      orderCount: s.orderCount
+    }));
+
+    const mostActiveEmployeesAgg = await Issuance.aggregate([
+      {
+        $group: {
+          _id: '$issuedTo',
+          qtyIssued: { $sum: '$quantityIssued' },
+          issuanceCount: { $sum: 1 }
+        }
+      },
+      { $sort: { qtyIssued: -1 } },
+      { $limit: 5 }
+    ]);
+    const activeEmployeeIdentifiers = mostActiveEmployeesAgg.map(e => e._id);
+    const activeEmployeesData = await Employee.find({ employeeIdentifier: { $in: activeEmployeeIdentifiers } });
+    const activeEmployeesMap = new Map(activeEmployeesData.map(e => [e.employeeIdentifier, e]));
+    const mostActiveEmployees = mostActiveEmployeesAgg.map(e => ({
+      employeeIdentifier: e._id,
+      employeeName: activeEmployeesMap.get(e._id)?.employeeName || null,
+      employeeId: activeEmployeesMap.get(e._id)?._id || null,
+      qtyIssued: e.qtyIssued,
+      issuanceCount: e.issuanceCount
     }));
 
     const today = new Date();
@@ -90,6 +130,29 @@ router.get('/', async (_req, res, next) => {
       purchasedQty: purchasedMap.get(d) || 0,
       issuedQty: issuedMap.get(d) || 0
     }));
+
+    const prevWeek = activityByDay.slice(0, 7);
+    const thisWeek = activityByDay.slice(7, 14);
+    const sumQty = (arr, key) => arr.reduce((acc, d) => acc + d[key], 0);
+    const thisWeekPurchased = sumQty(thisWeek, 'purchasedQty');
+    const prevWeekPurchased = sumQty(prevWeek, 'purchasedQty');
+    const thisWeekIssued = sumQty(thisWeek, 'issuedQty');
+    const prevWeekIssued = sumQty(prevWeek, 'issuedQty');
+
+    function trendPct(current, previous) {
+      if (previous === 0) return current === 0 ? 0 : 100;
+      return Math.round(((current - previous) / previous) * 100);
+    }
+
+    const weeklyTrend = {
+      thisWeekPurchased,
+      prevWeekPurchased,
+      purchasedTrendPct: trendPct(thisWeekPurchased, prevWeekPurchased),
+      thisWeekIssued,
+      prevWeekIssued,
+      issuedTrendPct: trendPct(thisWeekIssued, prevWeekIssued),
+      netChangeThisWeek: thisWeekPurchased - thisWeekIssued
+    };
 
     const purchases = await Purchase.find()
       .sort({ purchasedAt: -1, _id: -1 })
@@ -163,7 +226,9 @@ router.get('/', async (_req, res, next) => {
         totalTrackedItems,
         lowStockCount: lowStockItems.length,
         purchaseLogCount,
-        issuanceLogCount
+        issuanceLogCount,
+        activeEmployeeCount,
+        ...weeklyTrend
       },
       widgets: {
         lowStockItems: lowStockItems.slice(0, 8).map((i) => ({
@@ -173,7 +238,14 @@ router.get('/', async (_req, res, next) => {
           currentStock: i.currentStock,
           minSafetyThreshold: i.minSafetyThreshold
         })),
+        stockHealth: {
+          healthyCount: totalTrackedItems - lowStockItems.length,
+          lowCount: lowStockItems.length,
+          totalCount: totalTrackedItems
+        },
         topIssuedItems,
+        topSuppliers,
+        mostActiveEmployees,
         activityByDay,
         recentActivity
       }

@@ -17,7 +17,7 @@ function sendWorkbook(res, { filename, workbook }) {
 
 router.get('/inventory', async (_req, res, next) => {
   try {
-    const items = await listItemsWithStock();
+    const { items } = await listItemsWithStock();
     const rows = items.map((i) => ({
       'Item Identifier': i.itemIdentifier,
       'Item Description': i.itemDescription,

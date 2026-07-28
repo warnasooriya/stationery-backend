@@ -8,9 +8,27 @@ const Employee = require('../models/Employee');
 
 const router = express.Router();
 
-router.get('/', async (_req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
-    const items = await listItemsWithStock();
+    const querySchema = z.object({
+      search: z.string().trim().optional(),
+      page: z.string().optional(),
+      pageSize: z.string().optional()
+    });
+    const q = querySchema.parse(req.query);
+
+    if (q.page || q.pageSize) {
+      const page = q.page ? Number(q.page) : 1;
+      const pageSize = q.pageSize ? Number(q.pageSize) : 10;
+      const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
+      const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 10;
+      const skip = (safePage - 1) * safePageSize;
+
+      const { items, total } = await listItemsWithStock({ search: q.search, skip, limit: safePageSize });
+      return res.json({ items, page: safePage, pageSize: safePageSize, total });
+    }
+
+    const { items } = await listItemsWithStock({ search: q.search });
     res.json({ items });
   } catch (err) {
     next(err);
@@ -64,9 +82,9 @@ router.get('/:id/bin-card', async (req, res, next) => {
     const q = querySchema.parse(req.query);
 
     const page = q.page ? Number(q.page) : 1;
-    const pageSize = q.pageSize ? Number(q.pageSize) : 25;
+    const pageSize = q.pageSize ? Number(q.pageSize) : 10;
     const safePage = Number.isFinite(page) && page > 0 ? Math.floor(page) : 1;
-    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 25;
+    const safePageSize = Number.isFinite(pageSize) && pageSize > 0 ? Math.min(200, Math.floor(pageSize)) : 10;
     const skip = (safePage - 1) * safePageSize;
 
     const item = await getItemCore(req.params.id);
@@ -235,6 +253,29 @@ router.patch('/:id', async (req, res, next) => {
         isActive: updatedItem.isActive
       }
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const item = await getItemCore(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+
+    const [hasPurchase, hasIssuance] = await Promise.all([
+      Purchase.exists({ itemId: item._id }),
+      Issuance.exists({ itemId: item._id })
+    ]);
+
+    if (hasPurchase || hasIssuance) {
+      return res.status(409).json({
+        error: 'Cannot delete — this item has purchase/issuance history. Use the Active/Inactive toggle instead.'
+      });
+    }
+
+    await Item.findByIdAndDelete(item._id);
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
